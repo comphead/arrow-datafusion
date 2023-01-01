@@ -1687,6 +1687,7 @@ async fn test_ts_dt_binary_ops() -> Result<()> {
     // test cast in where clause
     let sql =
         "select count(1) result from (select now() as n) a where n = '2000-01-01'::date";
+
     let results = execute_to_batches(&ctx, sql).await;
 
     let expected = vec![
@@ -1716,6 +1717,20 @@ async fn test_ts_dt_binary_ops() -> Result<()> {
 
     // test cast in equal select
     let sql = "select now() = '2000-01-01'::date as result";
+    let df = ctx.sql(sql).await.unwrap();
+
+    let plan = df.explain(true, false)?.collect().await?;
+    let batch = &plan[0];
+    let mut res: Option<String> = None;
+    for row in 0..batch.num_rows() {
+        if &array_value_to_string(batch.column(0), row)?
+            == "logical_plan after type_coercion"
+        {
+            res = Some(array_value_to_string(batch.column(1), row)?);
+            break;
+        }
+    }
+    assert_eq!(res, Some("Projection: CAST(now() AS Date32) = CAST(Utf8(\"2000-01-01\") AS Date32) AS result\n  EmptyRelation".to_string()));
     let results = execute_to_batches(&ctx, sql).await;
 
     let expected = vec![
