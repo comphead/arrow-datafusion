@@ -15,13 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use arrow::util::display::array_value_to_string;
 use core::fmt;
 use std::{fmt::Display, vec};
 
 use arrow_array::{Date32Array, Date64Array};
 use arrow_schema::DataType;
+use sqlparser::ast::Value::SingleQuotedString;
 use sqlparser::ast::{
-    self, Expr as AstExpr, Function, FunctionArg, Ident, UnaryOperator,
+    self, Expr as AstExpr, Function, FunctionArg, Ident, Interval, UnaryOperator,
 };
 
 use datafusion_common::{
@@ -130,13 +132,15 @@ impl Unparser<'_> {
                         value: func_name.to_string(),
                         quote_style: None,
                     }]),
-                    args,
+                    args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args,
+                        clauses: vec![],
+                    }),
                     filter: None,
                     null_treatment: None,
                     over: None,
-                    distinct: false,
-                    special: false,
-                    order_by: vec![],
+                    within_group: vec![],
                 }))
             }
             Expr::Between(Between {
@@ -201,6 +205,7 @@ impl Unparser<'_> {
             Expr::Cast(Cast { expr, data_type }) => {
                 let inner_expr = self.expr_to_sql(expr)?;
                 Ok(ast::Expr::Cast {
+                    kind: ast::CastKind::Cast,
                     expr: Box::new(inner_expr),
                     data_type: self.arrow_dtype_to_ast_dtype(data_type)?,
                     format: None,
@@ -236,8 +241,8 @@ impl Unparser<'_> {
                     .map(|expr| expr_to_unparsed(expr)?.into_order_by_expr())
                     .collect::<Result<Vec<_>>>()?;
 
-                let start_bound = self.convert_bound(&window_frame.start_bound);
-                let end_bound = self.convert_bound(&window_frame.end_bound);
+                let start_bound = self.convert_bound(&window_frame.start_bound)?;
+                let end_bound = self.convert_bound(&window_frame.end_bound)?;
                 let over = Some(ast::WindowType::WindowSpec(ast::WindowSpec {
                     window_name: None,
                     partition_by: partition_by
@@ -257,13 +262,15 @@ impl Unparser<'_> {
                         value: func_name.to_string(),
                         quote_style: None,
                     }]),
-                    args,
+                    args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args,
+                        clauses: vec![],
+                    }),
                     filter: None,
                     null_treatment: None,
                     over,
-                    distinct: false,
-                    special: false,
-                    order_by: vec![],
+                    within_group: vec![],
                 }))
             }
             Expr::SimilarTo(Like {
@@ -283,7 +290,7 @@ impl Unparser<'_> {
                 negated: *negated,
                 expr: Box::new(self.expr_to_sql(expr)?),
                 pattern: Box::new(self.expr_to_sql(pattern)?),
-                escape_char: *escape_char,
+                escape_char: escape_char.map(|c| c.to_string()),
             }),
             Expr::AggregateFunction(agg) => {
                 let func_name = agg.func_def.name();
@@ -298,13 +305,17 @@ impl Unparser<'_> {
                         value: func_name.to_string(),
                         quote_style: None,
                     }]),
-                    args,
+                    args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+                        duplicate_treatment: agg
+                            .distinct
+                            .then_some(ast::DuplicateTreatment::Distinct),
+                        args,
+                        clauses: vec![],
+                    }),
                     filter,
                     null_treatment: None,
                     over: None,
-                    distinct: agg.distinct,
-                    special: false,
-                    order_by: vec![],
+                    within_group: vec![],
                 }))
             }
             Expr::ScalarSubquery(subq) => {
@@ -414,7 +425,8 @@ impl Unparser<'_> {
             }
             Expr::TryCast(TryCast { expr, data_type }) => {
                 let inner_expr = self.expr_to_sql(expr)?;
-                Ok(ast::Expr::TryCast {
+                Ok(ast::Expr::Cast {
+                    kind: ast::CastKind::TryCast,
                     expr: Box::new(inner_expr),
                     data_type: self.arrow_dtype_to_ast_dtype(data_type)?,
                     format: None,
@@ -513,20 +525,30 @@ impl Unparser<'_> {
     fn convert_bound(
         &self,
         bound: &datafusion_expr::window_frame::WindowFrameBound,
-    ) -> ast::WindowFrameBound {
+    ) -> Result<ast::WindowFrameBound> {
         match bound {
             datafusion_expr::window_frame::WindowFrameBound::Preceding(val) => {
-                ast::WindowFrameBound::Preceding(
-                    self.scalar_to_sql(val).map(Box::new).ok(),
-                )
+                Ok(ast::WindowFrameBound::Preceding({
+                    let val = self.scalar_to_sql(val)?;
+                    if let ast::Expr::Value(ast::Value::Null) = &val {
+                        None
+                    } else {
+                        Some(Box::new(val))
+                    }
+                }))
             }
             datafusion_expr::window_frame::WindowFrameBound::Following(val) => {
-                ast::WindowFrameBound::Following(
-                    self.scalar_to_sql(val).map(Box::new).ok(),
-                )
+                Ok(ast::WindowFrameBound::Following({
+                    let val = self.scalar_to_sql(val)?;
+                    if let ast::Expr::Value(ast::Value::Null) = &val {
+                        None
+                    } else {
+                        Some(Box::new(val))
+                    }
+                }))
             }
             datafusion_expr::window_frame::WindowFrameBound::CurrentRow => {
-                ast::WindowFrameBound::CurrentRow
+                Ok(ast::WindowFrameBound::CurrentRow)
             }
         }
     }
@@ -633,6 +655,10 @@ impl Unparser<'_> {
                 Ok(ast::Expr::Value(ast::Value::Boolean(b.to_owned())))
             }
             ScalarValue::Boolean(None) => Ok(ast::Expr::Value(ast::Value::Null)),
+            ScalarValue::Float16(Some(f)) => {
+                Ok(ast::Expr::Value(ast::Value::Number(f.to_string(), false)))
+            }
+            ScalarValue::Float16(None) => Ok(ast::Expr::Value(ast::Value::Null)),
             ScalarValue::Float32(Some(f)) => {
                 Ok(ast::Expr::Value(ast::Value::Number(f.to_string(), false)))
             }
@@ -685,12 +711,20 @@ impl Unparser<'_> {
                 ast::Value::SingleQuotedString(str.to_string()),
             )),
             ScalarValue::Utf8(None) => Ok(ast::Expr::Value(ast::Value::Null)),
+            ScalarValue::Utf8View(Some(str)) => Ok(ast::Expr::Value(
+                ast::Value::SingleQuotedString(str.to_string()),
+            )),
+            ScalarValue::Utf8View(None) => Ok(ast::Expr::Value(ast::Value::Null)),
             ScalarValue::LargeUtf8(Some(str)) => Ok(ast::Expr::Value(
                 ast::Value::SingleQuotedString(str.to_string()),
             )),
             ScalarValue::LargeUtf8(None) => Ok(ast::Expr::Value(ast::Value::Null)),
             ScalarValue::Binary(Some(_)) => not_impl_err!("Unsupported scalar: {v:?}"),
             ScalarValue::Binary(None) => Ok(ast::Expr::Value(ast::Value::Null)),
+            ScalarValue::BinaryView(Some(_)) => {
+                not_impl_err!("Unsupported scalar: {v:?}")
+            }
+            ScalarValue::BinaryView(None) => Ok(ast::Expr::Value(ast::Value::Null)),
             ScalarValue::FixedSizeBinary(..) => {
                 not_impl_err!("Unsupported scalar: {v:?}")
             }
@@ -715,6 +749,7 @@ impl Unparser<'_> {
                     ))?;
 
                 Ok(ast::Expr::Cast {
+                    kind: ast::CastKind::Cast,
                     expr: Box::new(ast::Expr::Value(ast::Value::SingleQuotedString(
                         date.to_string(),
                     ))),
@@ -737,6 +772,7 @@ impl Unparser<'_> {
                     ))?;
 
                 Ok(ast::Expr::Cast {
+                    kind: ast::CastKind::Cast,
                     expr: Box::new(ast::Expr::Value(ast::Value::SingleQuotedString(
                         datetime.to_string(),
                     ))),
@@ -800,7 +836,22 @@ impl Unparser<'_> {
             }
             ScalarValue::IntervalDayTime(None) => Ok(ast::Expr::Value(ast::Value::Null)),
             ScalarValue::IntervalMonthDayNano(Some(_i)) => {
-                not_impl_err!("Unsupported scalar: {v:?}")
+                let wrap_array = v.to_array()?;
+                let Some(result) = array_value_to_string(&wrap_array, 0).ok() else {
+                    return internal_err!(
+                        "Unable to convert IntervalMonthDayNano to string"
+                    );
+                };
+                let interval = Interval {
+                    value: Box::new(ast::Expr::Value(SingleQuotedString(
+                        result.to_uppercase(),
+                    ))),
+                    leading_field: None,
+                    leading_precision: None,
+                    last_field: None,
+                    fractional_seconds_precision: None,
+                };
+                Ok(ast::Expr::Interval(interval))
             }
             ScalarValue::IntervalMonthDayNano(None) => {
                 Ok(ast::Expr::Value(ast::Value::Null))
@@ -928,19 +979,21 @@ impl Unparser<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::{Add, Sub};
     use std::{any::Any, sync::Arc, vec};
 
     use arrow::datatypes::{Field, Schema};
     use arrow_schema::DataType::Int8;
-
     use datafusion_common::TableReference;
     use datafusion_expr::{
-        case, col, cube, exists,
-        expr::{AggregateFunction, AggregateFunctionDefinition},
-        grouping_set, lit, not, not_exists, out_ref_col, placeholder, rollup, table_scan,
-        try_cast, when, wildcard, ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature,
-        Volatility, WindowFrame, WindowFunctionDefinition,
+        case, col, cube, exists, grouping_set, lit, not, not_exists, out_ref_col,
+        placeholder, rollup, table_scan, try_cast, when, wildcard, ColumnarValue,
+        ScalarUDF, ScalarUDFImpl, Signature, Volatility, WindowFrame,
+        WindowFunctionDefinition,
     };
+    use datafusion_expr::{interval_month_day_nano_lit, AggregateExt};
+    use datafusion_functions_aggregate::count::count_udaf;
+    use datafusion_functions_aggregate::expr_fn::sum;
 
     use crate::unparser::dialect::CustomDialect;
 
@@ -1098,43 +1151,21 @@ mod tests {
                 Expr::Literal(ScalarValue::Date32(Some(-1))),
                 r#"CAST('1969-12-31' AS DATE)"#,
             ),
+            (sum(col("a")), r#"sum(a)"#),
             (
-                Expr::AggregateFunction(AggregateFunction {
-                    func_def: AggregateFunctionDefinition::BuiltIn(
-                        datafusion_expr::AggregateFunction::Sum,
-                    ),
-                    args: vec![col("a")],
-                    distinct: false,
-                    filter: None,
-                    order_by: None,
-                    null_treatment: None,
-                }),
-                r#"SUM(a)"#,
-            ),
-            (
-                Expr::AggregateFunction(AggregateFunction {
-                    func_def: AggregateFunctionDefinition::BuiltIn(
-                        datafusion_expr::AggregateFunction::Count,
-                    ),
-                    args: vec![Expr::Wildcard { qualifier: None }],
-                    distinct: true,
-                    filter: None,
-                    order_by: None,
-                    null_treatment: None,
-                }),
+                count_udaf()
+                    .call(vec![Expr::Wildcard { qualifier: None }])
+                    .distinct()
+                    .build()
+                    .unwrap(),
                 "COUNT(DISTINCT *)",
             ),
             (
-                Expr::AggregateFunction(AggregateFunction {
-                    func_def: AggregateFunctionDefinition::BuiltIn(
-                        datafusion_expr::AggregateFunction::Count,
-                    ),
-                    args: vec![Expr::Wildcard { qualifier: None }],
-                    distinct: false,
-                    filter: Some(Box::new(lit(true))),
-                    order_by: None,
-                    null_treatment: None,
-                }),
+                count_udaf()
+                    .call(vec![Expr::Wildcard { qualifier: None }])
+                    .filter(lit(true))
+                    .build()
+                    .unwrap(),
                 "COUNT(*) FILTER (WHERE true)",
             ),
             (
@@ -1148,13 +1179,11 @@ mod tests {
                     window_frame: WindowFrame::new(None),
                     null_treatment: None,
                 }),
-                r#"ROW_NUMBER(col) OVER (ROWS BETWEEN NULL PRECEDING AND NULL FOLLOWING)"#,
+                r#"ROW_NUMBER(col) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"#,
             ),
             (
                 Expr::WindowFunction(WindowFunction {
-                    fun: WindowFunctionDefinition::AggregateFunction(
-                        datafusion_expr::AggregateFunction::Count,
-                    ),
+                    fun: WindowFunctionDefinition::AggregateUDF(count_udaf()),
                     args: vec![wildcard()],
                     partition_by: vec![],
                     order_by: vec![Expr::Sort(Sort::new(
@@ -1252,6 +1281,30 @@ mod tests {
             ),
             (col("need-quoted").eq(lit(1)), r#"("need-quoted" = 1)"#),
             (col("need quoted").eq(lit(1)), r#"("need quoted" = 1)"#),
+            (
+                interval_month_day_nano_lit(
+                    "1 YEAR 1 MONTH 1 DAY 3 HOUR 10 MINUTE 20 SECOND",
+                ),
+                r#"INTERVAL '0 YEARS 13 MONS 1 DAYS 3 HOURS 10 MINS 20.000000000 SECS'"#,
+            ),
+            (
+                interval_month_day_nano_lit("1.5 MONTH"),
+                r#"INTERVAL '0 YEARS 1 MONS 15 DAYS 0 HOURS 0 MINS 0.000000000 SECS'"#,
+            ),
+            (
+                interval_month_day_nano_lit("-3 MONTH"),
+                r#"INTERVAL '0 YEARS -3 MONS 0 DAYS 0 HOURS 0 MINS 0.000000000 SECS'"#,
+            ),
+            (
+                interval_month_day_nano_lit("1 MONTH")
+                    .add(interval_month_day_nano_lit("1 DAY")),
+                r#"(INTERVAL '0 YEARS 1 MONS 0 DAYS 0 HOURS 0 MINS 0.000000000 SECS' + INTERVAL '0 YEARS 0 MONS 1 DAYS 0 HOURS 0 MINS 0.000000000 SECS')"#,
+            ),
+            (
+                interval_month_day_nano_lit("1 MONTH")
+                    .sub(interval_month_day_nano_lit("1 DAY")),
+                r#"(INTERVAL '0 YEARS 1 MONS 0 DAYS 0 HOURS 0 MINS 0.000000000 SECS' - INTERVAL '0 YEARS 0 MONS 1 DAYS 0 HOURS 0 MINS 0.000000000 SECS')"#,
+            ),
         ];
 
         for (expr, expected) in tests {

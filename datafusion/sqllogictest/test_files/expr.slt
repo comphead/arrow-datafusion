@@ -63,7 +63,7 @@ SELECT
 NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL
 
 # test_array_cast_invalid_timezone_will_panic
-statement error Parser error: Invalid timezone "Foo": 'Foo' is not a valid timezone
+statement error Parser error: Invalid timezone "Foo": failed to parse timezone
 SELECT arrow_cast('2021-01-02T03:04:00', 'Timestamp(Nanosecond, Some("Foo"))')
 
 # test_array_index
@@ -542,6 +542,11 @@ SELECT repeat('Pg', 4)
 PgPgPgPg
 
 query T
+SELECT repeat('Pg', -1)
+----
+(empty)
+
+query T
 SELECT repeat('Pg', CAST(NULL AS INT))
 ----
 NULL
@@ -620,6 +625,19 @@ query T
 SELECT split_part('abc~@~def~@~ghi', '~@~', CAST(NULL AS INT))
 ----
 NULL
+
+query T
+SELECT split_part('abc~@~def~@~ghi', '~@~', -1)
+----
+ghi
+
+query T
+SELECT split_part('abc~@~def~@~ghi', '~@~', -100)
+----
+(empty)
+
+statement error DataFusion error: Execution error: field position must not be zero
+SELECT split_part('abc~@~def~@~ghi', '~@~', 0)
 
 query B
 SELECT starts_with('alphabet', 'alph')
@@ -809,6 +827,12 @@ SELECT
 
 # test_extract_date_part
 
+query error
+SELECT EXTRACT("'''year'''" FROM  timestamp '2020-09-08T12:00:00+00:00')
+
+query error
+SELECT EXTRACT("'year'" FROM  timestamp '2020-09-08T12:00:00+00:00')
+
 query R
 SELECT date_part('YEAR', CAST('2000-01-01' AS DATE))
 ----
@@ -818,6 +842,14 @@ query R
 SELECT EXTRACT(year FROM  timestamp '2020-09-08T12:00:00+00:00')
 ----
 2020
+
+query R
+SELECT EXTRACT("year" FROM  timestamp '2020-09-08T12:00:00+00:00')
+----
+2020
+
+query error
+SELECT EXTRACT('year' FROM  timestamp '2020-09-08T12:00:00+00:00')
 
 query R
 SELECT date_part('QUARTER', CAST('2000-01-01' AS DATE))
@@ -830,6 +862,14 @@ SELECT EXTRACT(quarter FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 3
 
 query R
+SELECT EXTRACT("quarter" FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+----
+3
+
+query error
+SELECT EXTRACT('quarter' FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+
+query R
 SELECT date_part('MONTH', CAST('2000-01-01' AS DATE))
 ----
 1
@@ -838,6 +878,14 @@ query R
 SELECT EXTRACT(month FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 ----
 9
+
+query R
+SELECT EXTRACT("month" FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+----
+9
+
+query error
+SELECT EXTRACT('month' FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 
 query R
 SELECT date_part('WEEK', CAST('2003-01-01' AS DATE))
@@ -850,6 +898,14 @@ SELECT EXTRACT(WEEK FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 37
 
 query R
+SELECT EXTRACT("WEEK" FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+----
+37
+
+query error
+SELECT EXTRACT('WEEK' FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+
+query R
 SELECT date_part('DAY', CAST('2000-01-01' AS DATE))
 ----
 1
@@ -858,6 +914,14 @@ query R
 SELECT EXTRACT(day FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 ----
 8
+
+query R
+SELECT EXTRACT("day" FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+----
+8
+
+query error
+SELECT EXTRACT('day' FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 
 query R
 SELECT date_part('DOY', CAST('2000-01-01' AS DATE))
@@ -870,6 +934,14 @@ SELECT EXTRACT(doy FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 252
 
 query R
+SELECT EXTRACT("doy" FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+----
+252
+
+query error
+SELECT EXTRACT('doy' FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+
+query R
 SELECT date_part('DOW', CAST('2000-01-01' AS DATE))
 ----
 6
@@ -878,6 +950,14 @@ query R
 SELECT EXTRACT(dow FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 ----
 2
+
+query R
+SELECT EXTRACT("dow" FROM to_timestamp('2020-09-08T12:00:00+00:00'))
+----
+2
+
+query error
+SELECT EXTRACT('dow' FROM to_timestamp('2020-09-08T12:00:00+00:00'))
 
 query R
 SELECT date_part('HOUR', CAST('2000-01-01' AS DATE))
@@ -890,9 +970,25 @@ SELECT EXTRACT(hour FROM to_timestamp('2020-09-08T12:03:03+00:00'))
 12
 
 query R
+SELECT EXTRACT("hour" FROM to_timestamp('2020-09-08T12:03:03+00:00'))
+----
+12
+
+query error
+SELECT EXTRACT('hour' FROM to_timestamp('2020-09-08T12:03:03+00:00'))
+
+query R
 SELECT EXTRACT(minute FROM to_timestamp('2020-09-08T12:12:00+00:00'))
 ----
 12
+
+query R
+SELECT EXTRACT("minute" FROM to_timestamp('2020-09-08T12:12:00+00:00'))
+----
+12
+
+query error
+SELECT EXTRACT('minute' FROM to_timestamp('2020-09-08T12:12:00+00:00'))
 
 query R
 SELECT date_part('minute', to_timestamp('2020-09-08T12:12:00+00:00'))
@@ -918,6 +1014,38 @@ query R
 SELECT EXTRACT(nanosecond FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
 ----
 12123456780
+
+query R
+SELECT EXTRACT("second" FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
+----
+12.12345678
+
+query R
+SELECT EXTRACT("millisecond" FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
+----
+12123.45678
+
+query R
+SELECT EXTRACT("microsecond" FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
+----
+12123456.78
+
+query R
+SELECT EXTRACT("nanosecond" FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
+----
+12123456780
+
+query error
+SELECT EXTRACT('second' FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
+
+query error
+SELECT EXTRACT('millisecond' FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
+
+query error
+SELECT EXTRACT('microsecond' FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
+
+query error
+SELECT EXTRACT('nanosecond' FROM timestamp '2020-09-08T12:00:12.12345678+00:00')
 
 # Keep precision when coercing Utf8 to Timestamp
 query R

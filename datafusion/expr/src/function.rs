@@ -70,6 +70,9 @@ pub struct AccumulatorArgs<'a> {
     /// If no `ORDER BY` is specified, `sort_exprs`` will be empty.
     pub sort_exprs: &'a [Expr],
 
+    /// The name of the aggregate expression
+    pub name: &'a str,
+
     /// Whether the aggregate function is distinct.
     ///
     /// ```sql
@@ -80,11 +83,8 @@ pub struct AccumulatorArgs<'a> {
     /// The input type of the aggregate function.
     pub input_type: &'a DataType,
 
-    /// The number of arguments the aggregate function takes.
-    pub args_num: usize,
-
-    /// The name of the expression
-    pub name: &'a str,
+    /// The logical expression of arguments the aggregate function takes.
+    pub input_exprs: &'a [Expr],
 }
 
 /// [`StateFieldsArgs`] contains information about the fields that an

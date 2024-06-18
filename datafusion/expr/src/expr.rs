@@ -255,19 +255,23 @@ pub enum Expr {
     /// can be used. The first form consists of a series of boolean "when" expressions with
     /// corresponding "then" expressions, and an optional "else" expression.
     ///
+    /// ```text
     /// CASE WHEN condition THEN result
     ///      [WHEN ...]
     ///      [ELSE result]
     /// END
+    /// ```
     ///
     /// The second form uses a base expression and then a series of "when" clauses that match on a
     /// literal value.
     ///
+    /// ```text
     /// CASE expression
     ///     WHEN value THEN result
     ///     [WHEN ...]
     ///     [ELSE result]
     /// END
+    /// ```
     Case(Case),
     /// Casts the expression to a given type and will return a runtime error if the expression cannot be cast.
     /// This expression is guaranteed to have a fixed type.
@@ -279,7 +283,12 @@ pub enum Expr {
     Sort(Sort),
     /// Represents the call of a scalar function with a set of arguments.
     ScalarFunction(ScalarFunction),
-    /// Represents the call of an aggregate built-in function with arguments.
+    /// Calls an aggregate function with arguments, and optional
+    /// `ORDER BY`, `FILTER`, `DISTINCT` and `NULL TREATMENT`.
+    ///
+    /// See also [`AggregateExt`] to set these fields.
+    ///
+    /// [`AggregateExt`]: crate::udaf::AggregateExt
     AggregateFunction(AggregateFunction),
     /// Represents the call of a window function with arguments.
     WindowFunction(WindowFunction),
@@ -541,28 +550,6 @@ pub enum GetFieldAccess {
     },
 }
 
-/// Returns the field of a [`ListArray`] or
-/// [`StructArray`] by `key`.
-///
-/// See [`GetFieldAccess`] for details.
-///
-/// [`ListArray`]: arrow::array::ListArray
-/// [`StructArray`]: arrow::array::StructArray
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct GetIndexedField {
-    /// The expression to take the field from
-    pub expr: Box<Expr>,
-    /// The name of the field to take
-    pub field: GetFieldAccess,
-}
-
-impl GetIndexedField {
-    /// Create a new GetIndexedField expression
-    pub fn new(expr: Box<Expr>, field: GetFieldAccess) -> Self {
-        Self { expr, field }
-    }
-}
-
 /// Cast expression
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Cast {
@@ -645,6 +632,10 @@ impl AggregateFunctionDefinition {
 }
 
 /// Aggregate function
+///
+/// See also  [`AggregateExt`] to set these fields on `Expr`
+///
+/// [`AggregateExt`]: crate::udaf::AggregateExt
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct AggregateFunction {
     /// Name of the function
@@ -754,10 +745,14 @@ impl WindowFunctionDefinition {
 impl fmt::Display for WindowFunctionDefinition {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            WindowFunctionDefinition::AggregateFunction(fun) => fun.fmt(f),
-            WindowFunctionDefinition::BuiltInWindowFunction(fun) => fun.fmt(f),
-            WindowFunctionDefinition::AggregateUDF(fun) => std::fmt::Debug::fmt(fun, f),
-            WindowFunctionDefinition::WindowUDF(fun) => fun.fmt(f),
+            WindowFunctionDefinition::AggregateFunction(fun) => {
+                std::fmt::Display::fmt(fun, f)
+            }
+            WindowFunctionDefinition::BuiltInWindowFunction(fun) => {
+                std::fmt::Display::fmt(fun, f)
+            }
+            WindowFunctionDefinition::AggregateUDF(fun) => std::fmt::Display::fmt(fun, f),
+            WindowFunctionDefinition::WindowUDF(fun) => std::fmt::Display::fmt(fun, f),
         }
     }
 }
@@ -1866,6 +1861,7 @@ fn write_name<W: Write>(w: &mut W, e: &Expr) -> Result<()> {
             null_treatment,
         }) => {
             write_function_name(w, &fun.to_string(), false, args)?;
+
             if let Some(nt) = null_treatment {
                 w.write_str(" ")?;
                 write!(w, "{}", nt)?;
@@ -1890,7 +1886,6 @@ fn write_name<W: Write>(w: &mut W, e: &Expr) -> Result<()> {
             null_treatment,
         }) => {
             write_function_name(w, func_def.name(), *distinct, args)?;
-
             if let Some(fe) = filter {
                 write!(w, " FILTER (WHERE {fe})")?;
             };
@@ -2141,18 +2136,6 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_count_return_type() -> Result<()> {
-        let fun = find_df_window_func("count").unwrap();
-        let observed = fun.return_type(&[DataType::Utf8])?;
-        assert_eq!(DataType::Int64, observed);
-
-        let observed = fun.return_type(&[DataType::UInt64])?;
-        assert_eq!(DataType::Int64, observed);
-
-        Ok(())
-    }
-
-    #[test]
     fn test_first_value_return_type() -> Result<()> {
         let fun = find_df_window_func("first_value").unwrap();
         let observed = fun.return_type(&[DataType::Utf8])?;
@@ -2255,15 +2238,17 @@ mod test {
             "nth_value",
             "min",
             "max",
-            "count",
             "avg",
-            "sum",
         ];
         for name in names {
             let fun = find_df_window_func(name).unwrap();
             let fun2 = find_df_window_func(name.to_uppercase().as_str()).unwrap();
             assert_eq!(fun, fun2);
-            assert_eq!(fun.to_string(), name.to_uppercase());
+            if fun.to_string() == "first_value" || fun.to_string() == "last_value" {
+                assert_eq!(fun.to_string(), name);
+            } else {
+                assert_eq!(fun.to_string(), name.to_uppercase());
+            }
         }
         Ok(())
     }

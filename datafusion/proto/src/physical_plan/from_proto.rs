@@ -126,7 +126,6 @@ pub fn parse_physical_window_expr(
 ) -> Result<Arc<dyn WindowExpr>> {
     let window_node_expr =
         parse_physical_exprs(&proto.args, registry, input_schema, codec)?;
-
     let partition_by =
         parse_physical_exprs(&proto.partition_by, registry, input_schema, codec)?;
 
@@ -145,14 +144,46 @@ pub fn parse_physical_window_expr(
             )
         })?;
 
-    let fun: WindowFunctionDefinition = convert_required!(proto.window_function)?;
+    let fun = if let Some(window_func) = proto.window_function.as_ref() {
+        match window_func {
+            protobuf::physical_window_expr_node::WindowFunction::AggrFunction(n) => {
+                let f = protobuf::AggregateFunction::try_from(*n).map_err(|_| {
+                    proto_error(format!(
+                        "Received an unknown window aggregate function: {n}"
+                    ))
+                })?;
+
+                WindowFunctionDefinition::AggregateFunction(f.into())
+            }
+            protobuf::physical_window_expr_node::WindowFunction::BuiltInFunction(n) => {
+                let f = protobuf::BuiltInWindowFunction::try_from(*n).map_err(|_| {
+                    proto_error(format!(
+                        "Received an unknown window builtin function: {n}"
+                    ))
+                })?;
+
+                WindowFunctionDefinition::BuiltInWindowFunction(f.into())
+            }
+            protobuf::physical_window_expr_node::WindowFunction::UserDefinedAggrFunction(udaf_name) => {
+                let agg_udf = registry.udaf(udaf_name)?;
+                WindowFunctionDefinition::AggregateUDF(agg_udf)
+            }
+        }
+    } else {
+        return Err(proto_error("Missing required field in protobuf"));
+    };
+
     let name = proto.name.clone();
+    // TODO: Remove extended_schema if functions are all UDAF
     let extended_schema =
         schema_add_window_field(&window_node_expr, input_schema, &fun, &name)?;
+    // approx_percentile_cont and approx_percentile_cont_weight are not supported for UDAF from protobuf yet.
+    let logical_exprs = &[];
     create_window_expr(
         &fun,
         name,
         &window_node_expr,
+        logical_exprs,
         &partition_by,
         &order_by,
         Arc::new(window_frame),
@@ -381,37 +412,6 @@ fn parse_required_physical_expr(
         .ok_or_else(|| {
             DataFusionError::Internal(format!("Missing required field {field:?}"))
         })
-}
-
-impl TryFrom<&protobuf::physical_window_expr_node::WindowFunction>
-    for WindowFunctionDefinition
-{
-    type Error = DataFusionError;
-
-    fn try_from(
-        expr: &protobuf::physical_window_expr_node::WindowFunction,
-    ) -> Result<Self, Self::Error> {
-        match expr {
-            protobuf::physical_window_expr_node::WindowFunction::AggrFunction(n) => {
-                let f = protobuf::AggregateFunction::try_from(*n).map_err(|_| {
-                    proto_error(format!(
-                        "Received an unknown window aggregate function: {n}"
-                    ))
-                })?;
-
-                Ok(WindowFunctionDefinition::AggregateFunction(f.into()))
-            }
-            protobuf::physical_window_expr_node::WindowFunction::BuiltInFunction(n) => {
-                let f = protobuf::BuiltInWindowFunction::try_from(*n).map_err(|_| {
-                    proto_error(format!(
-                        "Received an unknown window builtin function: {n}"
-                    ))
-                })?;
-
-                Ok(WindowFunctionDefinition::BuiltInWindowFunction(f.into()))
-            }
-        }
-    }
 }
 
 pub fn parse_protobuf_hash_partitioning(
