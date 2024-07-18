@@ -38,9 +38,6 @@ use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::FileReader;
 use arrow_array::types::UInt64Type;
-use futures::{Stream, StreamExt};
-use hashbrown::HashSet;
-
 use datafusion_common::{
     internal_err, not_impl_err, plan_err, DataFusionError, JoinSide, JoinType, Result,
 };
@@ -50,6 +47,8 @@ use datafusion_execution::runtime_env::RuntimeEnv;
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::equivalence::join_equivalence_properties;
 use datafusion_physical_expr::{PhysicalExprRef, PhysicalSortRequirement};
+use futures::{Stream, StreamExt};
+use hashbrown::HashSet;
 
 use crate::expressions::PhysicalSortExpr;
 use crate::joins::utils::{
@@ -579,11 +578,20 @@ impl StreamedBatch {
     }
 }
 
+/// The data stored in this BufferedBatch
+#[derive(Debug)]
+enum BufferedBatchData {
+    /// The batch is in memory
+    InMemory(RecordBatch),
+    /// The batch is spilled to disk
+    Spilled(RefCountedTempFile),
+}
+
 /// A buffered batch that contains contiguous rows with same join key
 #[derive(Debug)]
 struct BufferedBatch {
-    /// The buffered record batch
-    pub batch: Option<RecordBatch>,
+    /// The data
+    pub data: BufferedBatchData,
     /// The range in which the rows share the same join key
     pub range: Range<usize>,
     /// Array refs of the join key
@@ -599,8 +607,6 @@ struct BufferedBatch {
     /// but if batch is spilled to disk this property is preferable
     /// and less expensive
     pub num_rows: usize,
-    /// A temp spill file name on the disk if the batch spilled
-    pub spill_file: Option<RefCountedTempFile>,
 }
 
 impl BufferedBatch {
@@ -628,14 +634,13 @@ impl BufferedBatch {
 
         let num_rows = batch.num_rows();
         BufferedBatch {
-            batch: Some(batch),
+            data: BufferedBatchData::InMemory(batch),
             range,
             join_arrays,
             null_joined: vec![],
             size_estimation,
             join_filter_failed_idxs: HashSet::new(),
             num_rows,
-            spill_file: None,
         }
     }
 }
@@ -891,9 +896,12 @@ impl SMJStream {
 
     fn free_reservation(&mut self, buffered_batch: BufferedBatch) -> Result<()> {
         // Shrink memory usage for in memory batches only
-        if buffered_batch.spill_file.is_none() && buffered_batch.batch.is_some() {
-            self.reservation
-                .try_shrink(buffered_batch.size_estimation)?;
+        match buffered_batch.data {
+            BufferedBatchData::InMemory(_) => {
+                self.reservation
+                    .try_shrink(buffered_batch.size_estimation)?;
+            }
+            BufferedBatchData::Spilled(_) => {}
         }
 
         Ok(())
@@ -914,23 +922,27 @@ impl SMJStream {
                     .disk_manager
                     .create_tmp_file("SortMergeJoinBuffered")?;
 
-                if let Some(batch) = buffered_batch.batch {
-                    spill_record_batches(
-                        vec![batch],
-                        spill_file.path().into(),
-                        Arc::clone(&self.buffered_schema),
-                    )?;
-                    buffered_batch.spill_file = Some(spill_file);
-                    buffered_batch.batch = None;
+                match buffered_batch.data {
+                    BufferedBatchData::InMemory(batch) => {
+                        spill_record_batches(
+                            vec![batch],
+                            spill_file.path().into(),
+                            Arc::clone(&self.buffered_schema),
+                        )?;
+                        buffered_batch.data = BufferedBatchData::Spilled(spill_file);
 
-                    // update metrics to register spill
-                    self.join_metrics.spill_count.add(1);
-                    self.join_metrics
-                        .spilled_bytes
-                        .add(buffered_batch.size_estimation);
-                    self.join_metrics.spilled_rows.add(buffered_batch.num_rows);
+                        // update metrics to register spill
+                        self.join_metrics.spill_count.add(1);
+                        self.join_metrics
+                            .spilled_bytes
+                            .add(buffered_batch.size_estimation);
+                        self.join_metrics.spilled_rows.add(buffered_batch.num_rows);
+                    }
+                    BufferedBatchData::Spilled(_) => {
+                        // This should not happen ???
+                        return internal_err!("Buffered batch is already spilled");
+                    }
                 }
-
                 Ok(())
             }
             Err(e) => Err(e),
@@ -1584,16 +1596,15 @@ fn get_buffered_columns_from_batch(
     buffered_batch: &BufferedBatch,
     buffered_indices: &UInt64Array,
 ) -> Result<Vec<ArrayRef>> {
-    match (&buffered_batch.spill_file, &buffered_batch.batch) {
-        // In memory batch
-        (None, Some(batch)) => Ok(batch
+    match &buffered_batch.data {
+        BufferedBatchData::InMemory(batch) => Ok(batch
             .columns()
             .iter()
             .map(|column| take(column, &buffered_indices, None))
             .collect::<Result<Vec<_>, ArrowError>>()
             .map_err(Into::<DataFusionError>::into)?),
         // If the batch was spilled to disk, less likely
-        (Some(spill_file), None) => {
+        BufferedBatchData::Spilled(spill_file) => {
             let mut buffered_cols: Vec<ArrayRef> =
                 Vec::with_capacity(buffered_indices.len());
 
@@ -1608,8 +1619,6 @@ fn get_buffered_columns_from_batch(
 
             Ok(buffered_cols)
         }
-        // Invalid combination
-        _ => internal_err!("Buffered batch spill status is in the inconsistent state."),
     }
 }
 
