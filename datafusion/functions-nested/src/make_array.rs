@@ -275,7 +275,7 @@ fn array_array<O: OffsetSizeTrait>(
     let data = mutable.freeze();
 
     Ok(Arc::new(GenericListArray::<O>::try_new(
-        Arc::new(Field::new_list_field(data_type, true)),
+        Arc::new(Field::new("element", data_type, true)),
         OffsetBuffer::new(offsets.into()),
         arrow::array::make_array(data),
         None,
