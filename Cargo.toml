@@ -156,7 +156,7 @@ half = { version = "2.7.0", default-features = false }
 hashbrown = { version = "0.14.5", features = ["raw"] }
 hex = { version = "0.4.3" }
 indexmap = "2.12.0"
-insta = { version = "1.43.2", features = ["glob", "filters"] }
+insta = { version = "1.44.1", features = ["glob", "filters"] }
 itertools = "0.14"
 liblzma = { version = "0.4.4", features = ["static"] }
 log = "^0.4"
