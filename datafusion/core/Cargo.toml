@@ -165,6 +165,7 @@ zstd = { workspace = true, optional = true }
 async-trait = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio", "async_futures"] }
 ctor = { workspace = true }
+dhat = "0.3.3"
 dashmap = "6.1.0"
 datafusion-doc = { workspace = true }
 datafusion-functions-window-common = { workspace = true }
