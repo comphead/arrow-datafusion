@@ -166,6 +166,8 @@ async-trait = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio", "async_futures"] }
 ctor = { workspace = true }
 dhat = "0.3.3"
+tikv-jemallocator = { version = "0.6", features = ["stats"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 dashmap = "6.1.0"
 datafusion-doc = { workspace = true }
 datafusion-functions-window-common = { workspace = true }
